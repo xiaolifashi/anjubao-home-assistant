@@ -28,15 +28,52 @@
                              └─ 518/708 帧 ────────> 开门解锁 / 挂断（冒充主机应答）
 ```
 
-仓库结构：
+仓库结构（共 14 个文件，逐个说明）：
 
-| 目录/文件 | 说明 |
+**firmware/ — ESPHome 固件（刷进 WT32-ETH01）**
+
+| 文件 | 作用 |
 |---|---|
-| `firmware/` | ESPHome 固件：`doorbell-bridge.yaml` + `doorbell.h`（协议引擎）+ `audio_data.h`（铃声静音流） |
-| `bridge/` | 视频桥：`bridge.py`（aiohttp 面板 + UDP 转发）、`Dockerfile`、`docker-compose.yaml`、`go2rtc.yaml`、`gen_certs.sh` |
-| `assets/ring.wav` | 平板响铃音频，放到 HA 的 `/config/www/ring.wav` |
-| `ha/rest_command.yaml` | Fully Kiosk 平板远程指令模板（响铃/跳转/亮屏） |
-| `tools/` | 部署辅助脚本（SSH 到 NAS、上传 bridge.py） |
+| `firmware/doorbell-bridge.yaml` | ESPHome 主配置：芯片/框架声明（esp-idf，注意别锁 5.4.x）、WiFi/secrets 引入、开机启动入口，以及大量按抓包调优过的 lwIP 参数（UDP 队列、EMAC DMA 缓冲、tcpip 优先级等——注释里写清了每个值为什么调、调到多少、踩过什么坑） |
+| `firmware/doorbell.h` | 协议引擎本体（约 1200 行 C++）：冒充室内主机注册/应答、区分真实振铃与状态探针、自动接听后静音保活、518/708 解锁挂断帧、视频/上下行音频三路 UDP 转发、门口机 IP 表（**部署时必改的三处都在这里**：`DB_ETH_IP`、`DB_GATES[]`、`DB_VIDEO_FWD_IP`） |
+| `firmware/audio_data.h` | 自动生成的抓包数据：251 个 A-law 静音包 + 4 个 RTCP 包（约 8 秒一轮循环）。呼叫接听后循环播放给门口机，维持"通话中"会话不中断。**是 doorbell.h 的编译依赖，不能删** |
+
+**bridge/ — 视频桥（Docker 部署在 NAS 上）**
+
+| 文件 | 作用 |
+|---|---|
+| `bridge/bridge.py` | 核心服务（aiohttp）：UDP 9880 收 ESP32 转来的视频、空闲生成"门禁待机中"画面、喂 ffmpeg；UDP 9990 收下行音频；6670 方向转发上行语音给 ESP32；HTTPS :8443 提供对讲面板（WebRTC 通话、解锁/挂断按钮走 HA webhook）；面板页同时代理 go2rtc 管理界面 |
+| `bridge/Dockerfile` | 运行环境：alpine + python3 + ffmpeg + aiohttp。启动命令把 bridge.py 的视频流（stdin）和音频流（UDP 9991）两路喂给 ffmpeg，封装成 H.264+PCMA 的 RTSP 推给 go2rtc；ffmpeg 意外退出 3 秒自动重连。注释里记录了几个 ffmpeg 实测坑（nobuffer 黑屏、时间戳对齐、音频 fifo） |
+| `bridge/docker-compose.yaml` | 编排文件：go2rtc 容器 + 视频桥容器（host 网络）。**部署时必改**：`ALLOWED_SRC`/`ESP32_IP`（ESP32 的 WiFi IP）、`HA_BASE`、两个 `HA_WEBHOOK_*` |
+| `bridge/go2rtc.yaml` | go2rtc 配置：8554(RTSP)/1984(管理)/8555(WebRTC) 端口，预声明 `menjin` 空流等视频桥来推（新版 go2rtc 不声明会拒绝匿名推流） |
+| `bridge/gen_certs.sh` | 一键生成自签 CA + 服务器证书（openssl，CA 10 年有效）：改 `SERVER_IP` 后执行，产出 `certs/` 给面板 HTTPS 用；CA 只生成一次，平板装好根证书后重复执行不影响信任 |
+
+**ha/ — Home Assistant 配置片段**
+
+| 文件 | 作用 |
+|---|---|
+| `ha/rest_command.yaml` | Fully Kiosk 平板远程指令模板 4 条：`fully_panel` 跳对讲面板、`fully_home` 挂断跳回 HA、`fully_ring` 响铃、`fully_wake` 亮屏。填好占位符后并入 configuration.yaml |
+
+**assets/ — 媒体资源**
+
+| 文件 | 作用 |
+|---|---|
+| `assets/ring.wav` | 楼下呼叫时平板播放的响铃音频，复制到 HA 的 `/config/www/ring.wav` 即可被 `fully_ring` 调用 |
+
+**tools/ — 部署辅助脚本（Windows 上跑，需 `pip install paramiko`）**
+
+| 文件 | 作用 |
+|---|---|
+| `tools/ssh_fnos.py` | 从电脑 SSH 到 NAS 执行任意命令（如 `docker ps`、看日志），凭据走环境变量 |
+| `tools/upload_bridge.py` | 改完 `bridge.py` 一键上传到 NAS 部署目录，免去开 FTP/SMB |
+
+**其他**
+
+| 文件 | 作用 |
+|---|---|
+| `README.md` | 本文件：架构、硬件清单、从零教程、常见问题 |
+| `ESP32开发板.jpg` / `POE分离器.jpg` / `前端看板1.png` / `前端看板2.png` | 文档配图：硬件实拍与对讲面板实际效果 |
+| `.gitignore` | 排除 `certs/`、`secrets.yaml`、密钥等敏感产物，防止误提交 |
 
 ## 硬件清单
 
