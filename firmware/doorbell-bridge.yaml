@@ -1,0 +1,165 @@
+# ============================================================================
+# 安居宝门禁桥接器 —— WT32-ETH01
+#
+# 接线/网络：
+#   以太网口 -> 门禁内网（原室内主机的网线，静态 IP 192.168.105.61，主机保持断电）
+#   WiFi     -> 家庭内网（连接 HAOS，用于手机推送和点“开门解锁”）
+#
+# 首次刷机：USB 转串口模块接 TX/RX/GND，IO0 接地后上电进入下载模式；
+#           之后即可通过 WiFi OTA 无线更新。
+# ============================================================================
+
+esphome:
+  name: doorbell-bridge
+  friendly_name: 门禁桥接器
+  includes:
+    - doorbell.h
+    - audio_data.h
+  on_boot:
+    then:
+      - lambda: |-
+          doorbell_start();
+
+esp32:
+  board: wt32-eth01
+  framework:
+    type: esp-idf    # 原生 IDF：以太网用 esp_eth 驱动直接初始化，不依赖 Arduino 库
+    # 注意：不要锁 IDF 5.4.x —— ESPHome 的 WiFi 组件依赖 5.5+ 的
+    # wifi_scan_config_t.coex_background_scan 字段，锁旧版会编译失败。
+    # IDF 5.5.x 的 SMI 引脚 bug（espressif/esp-idf#18756）已在 doorbell.h
+    # 的 db_eth_init() 里按 5.4.2 的顺序重做引脚配置来规避。
+    sdkconfig_options:
+      CONFIG_ETH_ENABLED: "y"
+      # 视频流约 158 包/秒：默认 UDP 接收队列只有 6 个包，稍一耽搁就溢出丢包
+      #（画面花屏）。调大到 64，配合独立的视频 RX 任务（收到立刻搬进环形缓冲）。
+      CONFIG_LWIP_UDP_RECVMBOX_SIZE: "64"
+      # tcpip 线程的收件箱默认只有 32：门口机按 100Mbps 线速突发（一阵最多 28 包、
+      # 间隔 86µs），线程稍被耽搁就溢出。调大到 64（只是指针队列，几乎不占内存）。
+      CONFIG_LWIP_TCPIP_RECVMBOX_SIZE: "64"
+      # EMAC 的 DMA 收包环默认 10 个缓冲（每个 1600 字节）：28 包的线速突发灌进来时，
+      # 收包任务一旦有几毫秒没被调度到就会溢出，MAC 层静默丢包（之前花屏的主因：
+      # 实测 收≈93/秒 < 门口机实发 158/秒，而 转=收、发失败=0）。
+      # 调到 16 个约多吃 10KB 内部 RAM（实测空闲堆 ~169KB，承受得起）。
+      # 注意：不要贪多调到 32！~35KB 会把 WiFi 发送缓冲挤爆，sendto 报 errno=12
+      #（ENOMEM）——实测踩过这个坑，16 是稳妥值。
+      CONFIG_ETH_DMA_RX_BUFFER_NUM: "16"
+      # tcpip 线程（lwIP 协议栈的心脏，每个收发包都要经过它）默认优先级只有 18，
+      # 低于 WiFi 任务（23）：WiFi 一忙它就排队，视频包在收件箱里被憋死。
+      # 提到 22——仍低于 WiFi 不抢它的活，但压过其余所有任务。
+      # 注：EMAC 收包任务的优先级在 doorbell.h 里提到 24 了（mac_config.rx_task_prio），
+      # 两者配合：收包（24）> 协议栈（22）> 我们的转发任务（11/12）。
+      CONFIG_LWIP_TCPIP_TASK_PRIO: "22"
+      # —— 修复“通话中点解锁/挂断没反应”（三次重试全部瞬间失败）——
+      # 病因是资源池太小，两个池都可能顶到：
+      # ① socket 表默认只有 10 个：6 个常驻 UDP + API 监听/连接 + OTA 监听 + mdns +
+      #    18022 监听已经 10+，通话中再多 2 个（音频/RTCP 保活），518/708 的 socket()
+      #    直接失败；监视只多 1 个所以勉强够用——这正解释了“监视好用、解锁不行”。
+      # ② TCP 连接池（PCB）默认 16 个，主动关闭方的 TIME_WAIT 残留 2×MSL（默认
+      #    120 秒）也占池子：4 台门口机每 60 秒的探针 + 注册帧 + 振铃连接攒下来，
+      #    通话中途 connect() 拿不到 PCB（errno=105）。
+      CONFIG_LWIP_MAX_SOCKETS: "24"
+      CONFIG_LWIP_MAX_ACTIVE_TCP: "24"
+      CONFIG_LWIP_TCP_MSL: "15000"     # TIME_WAIT 残留 120s → 30s（局域网 RTT<1ms，很安全）
+
+logger:
+
+# HA 原生 API（走 WiFi）。api_key 写在 secrets.yaml 里，
+# 首次编译时 ESPHome Dashboard 会提示生成。
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none   # 视频转发对时延敏感，关掉 WiFi 省电（防 DTIM 攒包突发）
+  # 本机 WiFi IP 已固定为 192.168.1.48（视频桥容器只接受这个地址的包）。
+  # 如果是用路由器 DHCP 预留实现的，这里不用动；如果以后想在固件里写死：
+  # manual_ip:
+  #   static_ip: 192.168.1.48
+  #   gateway: 192.168.1.1
+  #   subnet: 255.255.255.0
+  ap: {}            # 连不上家里 WiFi 时开热点兜底，方便重新配置
+
+captive_portal:
+
+# ---------------- HA 实体 ----------------
+# 注意 1：实体名必须带不重复的英文后缀 —— ESPHome 生成实体 ID 时会剥掉中文，
+#         纯中文名会变成相同的 "____" 导致重名报错。
+# 注意 2：新版 ESPHome 的 template 实体不再支持 update_interval 轮询，
+#         状态统一由下方 interval 每秒 publish_state 推送。
+button:
+  - platform: template
+    name: "开门解锁 Unlock"
+    id: btn_unlock
+    icon: "mdi:door-open"
+    on_press:
+      - lambda: |-
+          doorbell_request_unlock();
+  - platform: template
+    name: "挂断呼叫 Hangup"
+    id: btn_hangup
+    icon: "mdi:phone-hangup"
+    on_press:
+      - lambda: |-
+          doorbell_request_hangup();
+  # 监视（不呼叫直接看画面）。doorbell_request_monitor 的参数是
+  # doorbell.h 里 DB_GATES 数组的下标：0=南门 1=西门 2=单元一楼 3=单元负一楼
+  - platform: template
+    name: "监视单元一楼 Monitor"
+    id: btn_monitor
+    icon: "mdi:cctv"
+    on_press:
+      - lambda: |-
+          doorbell_request_monitor(2);
+  - platform: template
+    name: "停止监视 StopMonitor"
+    id: btn_monitor_stop
+    icon: "mdi:cctv-off"
+    on_press:
+      - lambda: |-
+          doorbell_request_monitor_stop();
+
+switch:
+  - platform: template
+    name: "自动解锁 AutoUnlock"
+    id: sw_auto
+    icon: "mdi:lock-open-variant"
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          doorbell_set_auto(true);
+    turn_off_action:
+      - lambda: |-
+          doorbell_set_auto(false);
+
+binary_sensor:
+  - platform: template
+    name: "门口机呼叫中 Ringing"
+    id: bs_ringing
+  - platform: template
+    name: "监视中 Monitoring"
+    id: bs_monitoring
+
+text_sensor:
+  - platform: template
+    name: "呼叫的门口机 Gate"
+    id: ts_gate
+    icon: "mdi:doorbell-video"
+  - platform: template
+    name: "门禁状态 Status"
+    id: ts_status
+
+# 每秒把门禁协议状态推送到上面的实体（协议跑在独立任务里，这里只做读取）
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          id(bs_ringing).publish_state(doorbell_call_active());
+          id(bs_monitoring).publish_state(doorbell_monitoring());
+          id(ts_gate).publish_state(doorbell_gate_name());
+          id(ts_status).publish_state(doorbell_status_text());
+          id(sw_auto).publish_state(doorbell_auto_enabled());

@@ -1,0 +1,37 @@
+# 安居宝门禁视频桥 —— fnOS Docker Compose
+# 用法：fnOS 的 Docker 里新建 Compose 项目，把本目录文件放进去启动即可。
+services:
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: doorbell-go2rtc
+    network_mode: host          # 直接占用 8554(RTSP)/1984(管理)/8555(WebRTC)
+    restart: unless-stopped
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+
+  video-bridge:
+    build: .
+    container_name: doorbell-video-bridge
+    network_mode: host          # 监听 UDP 9880(视频)/9990(下行音频)；面板 HTTPS :8443
+    restart: unless-stopped
+    depends_on:
+      - go2rtc
+    environment:
+      LISTEN_PORT: "9880"
+      # 只接受 WT32-ETH01（WiFi 侧 IP）发来的包（视频和下行音频都按此白名单过滤）。
+      ALLOWED_SRC: "192.168.1.48"
+      RTSP_URL: "rtsp://127.0.0.1:8554/menjin"
+      # ---- 二期：双向对讲 ----
+      ESP32_IP: "192.168.1.48"      # 上行音频发给 ESP32（WiFi 侧）
+      ESP32_AUDIO_PORT: "6670"
+      AUDIO_LISTEN_PORT: "9990"       # 收 ESP32 转来的门口机语音
+      AUDIO_FFMPEG_PORT: "9991"       # 喂给本机 ffmpeg 的口
+      PANEL_PORT: "8443"              # 对讲面板 HTTPS 端口
+      CERT_DIR: "/certs"
+      # 面板「解锁/挂断」按钮要调的 HA webhook（先按 README 建好自动化再填）：
+      HA_BASE: "http://192.168.1.11:8123"
+      HA_WEBHOOK_UNLOCK: ""
+      HA_WEBHOOK_HANGUP: ""
+    volumes:
+      - ./certs:/certs:ro             # gen_certs.sh 生成的 server.crt / server.key
+      - ./bridge.py:/app/bridge.py:ro  # 面板代码挂载宿主文件，改完重启容器即生效

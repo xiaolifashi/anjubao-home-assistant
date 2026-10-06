@@ -1,0 +1,7 @@
+certs/
+secrets.yaml
+*.pem
+*.key
+*.crt
+__pycache__/
+.DS_Store
