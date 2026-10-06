@@ -50,19 +50,19 @@
 | `bridge/go2rtc.yaml` | go2rtc 配置：8554(RTSP)/1984(管理)/8555(WebRTC) 端口，预声明 `menjin` 空流等视频桥来推（新版 go2rtc 不声明会拒绝匿名推流） |
 | `bridge/gen_certs.sh` | 一键生成自签 CA + 服务器证书（openssl，CA 10 年有效）：改 `SERVER_IP` 后执行，产出 `certs/` 给面板 HTTPS 用；CA 只生成一次，平板装好根证书后重复执行不影响信任 |
 
-**ha/ — Home Assistant 配置片段**
+**ha/ — Home Assistant 配置片段，此配置是为了平板上墙，平板屏幕常亮显示home assistant的主界面，遇到有人呼叫，自动跳转到门禁前端看板，如果不需要此功能，无需配置**
 
 | 文件 | 作用 |
 |---|---|
 | `ha/rest_command.yaml` | Fully Kiosk 平板远程指令模板 4 条：`fully_panel` 跳对讲面板、`fully_home` 挂断跳回 HA、`fully_ring` 响铃、`fully_wake` 亮屏。填好占位符后并入 configuration.yaml |
 
-**assets/ — 媒体资源**
+**assets/ — 媒体资源，此配置是为了平板上墙，平板屏幕常亮显示home assistant的主界面，遇到有人呼叫，自动响铃，如果不需要此功能，无需配置**
 
 | 文件 | 作用 |
 |---|---|
 | `assets/ring.wav` | 楼下呼叫时平板播放的响铃音频，复制到 HA 的 `/config/www/ring.wav` 即可被 `fully_ring` 调用 |
 
-**tools/ — 部署辅助脚本（Windows 上跑，需 `pip install paramiko`）**
+**tools/ — 部署辅助脚本（Windows 上跑，需 `pip install paramiko`）此项目调试过程中，需要频繁ssh更新配置文件，如果您不需要频繁调试，不用管这两个python文件，自己用ssh工具手动上传即可**
 
 | 文件 | 作用 |
 |---|---|
@@ -154,7 +154,7 @@ docker compose up -d --build
 验证：浏览器开 `http://<NAS_IP>:1984`（go2rtc 管理页）能看到 `menjin` 流；
 `https://<NAS_IP>:8443` 打开对讲面板（证书是自签的，先按第 4 步信任 CA 或先点继续访问）。
 
-### 第 4 步：平板/手机信任自签 CA
+### 第 4 步：平板/手机信任自签 CA，因为此前端看板需要麦克风敏感权限，所以需要用的https自签证书
 
 - 面板页 `https://<NAS_IP>:8443/ca.crt` 可直接下载 CA 证书。
 - **iPad**：描述文件方式安装（设置 → 通用 → VPN与设备管理 → 安装），再到
