@@ -165,7 +165,7 @@ docker compose up -d --build
 ![前端看板1](./前端看板1.png)
 ![前端看板2](./前端看板2.png)
 
-### 第 5 步：Home Assistant 配置
+### 第 5 步：Home Assistant 配置，此配置是为了平板上墙，平板屏幕常亮显示home assistant的主界面，遇到有人呼叫，自动跳转到门禁前端看板，如果不需要此功能，无需配置
 
 **webhook 自动化**（面板解锁/挂断按钮 → HA 执行）：
 
@@ -189,11 +189,11 @@ automation:
 
 建好后把 `docker-compose.yaml` 里两个 `HA_WEBHOOK_*` 填成上面 webhook_id，重启容器。
 
-**呼叫联动 + 平板跳转**（需要 Fully Kiosk Browser，Plus 版约 $7.5 一次性）：
+**呼叫联动 + 平板跳转**（需要 Fully Kiosk Browser，Plus 版约 $7.5 一次性，反正作者是没有花钱，用的免费版）：
 
 1. 平板上装 Fully Kiosk，设为开机自启、常亮、锁定 HA 页面。
 2. 设置 → Remote Admin 设密码并开启；**Enable Microphone Access**（Plus 功能，
-   不开的话按住说话会提示"麦克风被拒绝"）。
+   如果你没有花钱，也可以用，只是在屏幕右上角会显示超大半透明水印）。
 3. 把 `ha/rest_command.yaml` 四个占位符填好并入 `configuration.yaml`。
 4. `assets/ring.wav` 复制到 HA 的 `/config/www/ring.wav`。
 5. 两条自动化：
