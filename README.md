@@ -6,6 +6,8 @@
 本仓库是作者自家（4 台门口机：南门/西门/单元一楼/单元负一楼 1台室内机安居宝AJB-ZD19C-8触摸屏无实体按键）改造的最终开源版，
 协议数据全部来自真实抓包。本仓库已脱敏：不含任何真实账号、密码、公网地址。
 
+问题交流qq群：162393379
+
 ## 功能一览
 
 - **视频监控**：门口机摄像头画面通过go2rtp推流到 Home Assistant，没有监视画面时显示"门禁待机中"，因为go2rtp推流插件，如果断流后，可能彻底down了，所以空闲时候推送"门禁待机中"字幕流，让流一直保持活跃状态
@@ -48,19 +50,19 @@
 | `bridge/go2rtc.yaml` | go2rtc 配置：8554(RTSP)/1984(管理)/8555(WebRTC) 端口，预声明 `menjin` 空流等视频桥来推（新版 go2rtc 不声明会拒绝匿名推流） |
 | `bridge/gen_certs.sh` | 一键生成自签 CA + 服务器证书（openssl，CA 10 年有效）：改 `SERVER_IP` 后执行，产出 `certs/` 给面板 HTTPS 用；CA 只生成一次，平板装好根证书后重复执行不影响信任 |
 
-**ha/ — Home Assistant 配置片段**
+**ha/ — Home Assistant 配置片段，此配置是为了平板上墙，平板屏幕常亮显示home assistant的主界面，遇到有人呼叫，自动跳转到门禁前端看板，如果不需要此功能，无需配置**
 
 | 文件 | 作用 |
 |---|---|
 | `ha/rest_command.yaml` | Fully Kiosk 平板远程指令模板 4 条：`fully_panel` 跳对讲面板、`fully_home` 挂断跳回 HA、`fully_ring` 响铃、`fully_wake` 亮屏。填好占位符后并入 configuration.yaml |
 
-**assets/ — 媒体资源**
+**assets/ — 媒体资源，此配置是为了平板上墙，平板屏幕常亮显示home assistant的主界面，遇到有人呼叫，自动响铃，如果不需要此功能，无需配置**
 
 | 文件 | 作用 |
 |---|---|
 | `assets/ring.wav` | 楼下呼叫时平板播放的响铃音频，复制到 HA 的 `/config/www/ring.wav` 即可被 `fully_ring` 调用 |
 
-**tools/ — 部署辅助脚本（Windows 上跑，需 `pip install paramiko`）**
+**tools/ — 部署辅助脚本（Windows 上跑，需 `pip install paramiko`）此项目调试过程中，需要频繁ssh更新配置文件，如果您不需要频繁调试，不用管这两个python文件，自己用ssh工具手动上传即可**
 
 | 文件 | 作用 |
 |---|---|
@@ -82,6 +84,7 @@
 | WT32-ETH01 开发板 | ¥19.56 | 核心桥接板，自带以太网口 + ESP32 | ![WT32-ETH01 开发板](./ESP32开发板.jpg) |
 | USB 转 TTL 模块（CH340/CP2102） | ¥10–15 | 首次刷机用，之后全部 OTA 无线更新 |
 | 非标24V转5VPOE分离器 | ¥14.6 | 给开发板和小米平板供电 | ![非标24V转5VPOE分离器](./POE分离器.jpg) |
+| type-c母版 | ¥6.01 | 给开发板和小米平板供电，1接poe分离器，2用电烙铁与esp连接，给esp供5v电，3接平板，让平板常亮 | ![typec母版](./typec母版.jpg) |
 | 杜邦线若干 | ¥5 | 刷机接线用 | 也可以不用，反正作者没用，直接用电烙铁接的线 |
 | 跑 Docker 的 NAS 或小主机 | — | 跑视频桥容器；作者用 fnOS，任何支持 Docker 的设备都行 |
 | iPad / 安卓平板 | — | 室内机，挂墙常亮，作者用的小米平板pad6pro |
@@ -154,7 +157,7 @@ docker compose up -d --build
 验证：浏览器开 `http://<NAS_IP>:1984`（go2rtc 管理页）能看到 `menjin` 流；
 `https://<NAS_IP>:8443` 打开对讲面板（证书是自签的，先按第 4 步信任 CA 或先点继续访问）。
 
-### 第 4 步：平板/手机信任自签 CA
+### 第 4 步：平板/手机信任自签 CA，因为此前端看板需要麦克风敏感权限，所以需要用的https自签证书
 
 - 面板页 `https://<NAS_IP>:8443/ca.crt` 可直接下载 CA 证书。
 - **iPad**：描述文件方式安装（设置 → 通用 → VPN与设备管理 → 安装），再到
@@ -165,7 +168,7 @@ docker compose up -d --build
 ![前端看板1](./前端看板1.png)
 ![前端看板2](./前端看板2.png)
 
-### 第 5 步：Home Assistant 配置
+### 第 5 步：Home Assistant 配置，此配置是为了平板上墙，平板屏幕常亮显示home assistant的主界面，遇到有人呼叫，自动跳转到门禁前端看板，如果不需要此功能，无需配置
 
 **webhook 自动化**（面板解锁/挂断按钮 → HA 执行）：
 
@@ -189,11 +192,11 @@ automation:
 
 建好后把 `docker-compose.yaml` 里两个 `HA_WEBHOOK_*` 填成上面 webhook_id，重启容器。
 
-**呼叫联动 + 平板跳转**（需要 Fully Kiosk Browser，Plus 版约 $7.5 一次性）：
+**呼叫联动 + 平板跳转**（需要 Fully Kiosk Browser，Plus 版约 $7.5 一次性，反正作者是没有花钱，用的免费版）：
 
 1. 平板上装 Fully Kiosk，设为开机自启、常亮、锁定 HA 页面。
 2. 设置 → Remote Admin 设密码并开启；**Enable Microphone Access**（Plus 功能，
-   不开的话按住说话会提示"麦克风被拒绝"）。
+   如果你没有花钱，也可以用，只是在屏幕右上角会显示超大半透明水印）。
 3. 把 `ha/rest_command.yaml` 四个占位符填好并入 `configuration.yaml`。
 4. `assets/ring.wav` 复制到 HA 的 `/config/www/ring.wav`。
 5. 两条自动化：
