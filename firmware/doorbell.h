@@ -2,11 +2,12 @@
 // ============================================================================
 // 安居宝可视门禁桥接 —— 协议实现（WT32-ETH01 / ESP32 + LAN8720，ESP-IDF 原生）
 //
-// 拓扑：以太网口接门禁内网（静态 192.168.105.61，冒充室内主机），
+// 拓扑：以太网口接门禁内网（静态 IP，冒充室内主机，见 DB_ETH_IP），
 //       WiFi 接家庭内网（ESPHome 原生 API 接入 HAOS）。
 //
 // 行为：
-//   1. 持续应答 4 台白名单门口机的 UDP 6672 寻人查询，并周期广播在线宣告；
+//   1. 只应答 4 台白名单门口机"找本户房号"的 UDP 6672 查询（按房号过滤，
+//      不答别户查询、不做周期在线宣告——与真实室内主机行为一致）；
 //   2. 门口机呼入（TCP 18022 反向连接）后自动 705 应答 + 710 接听，
 //      并循环播放抓包静音音频保持会话；
 //   3. 等待 HA 侧点“开门解锁”（发 518）或“挂断”（发 708）；
@@ -37,17 +38,15 @@ static uint32_t db_millis() {   // 毫秒时钟（替代 Arduino 的 millis()）
 }
 
 // ---------------- 用户配置 ----------------
-#define DB_ETH_IP        "192.168.105.61"   // 室内主机的 IP（本机冒充它）
+#define DB_ETH_IP        "192.168.105.99"   // 室内主机的 IP（本机冒充它）
 #define DB_ETH_GW        "192.168.0.1"      // 门禁内网网关（隔离网，填不存在的地址也没影响）
 #define DB_ETH_MASK      "255.255.0.0"      // 门禁内网是 192.168.x.x 大网段
 #define DB_BROADCAST     "192.168.255.255"  // 门禁内网广播地址
 #define DB_GATE_PORT     18022              // 门口机控制端口
 #define DB_QUERY_PORT    6672               // 寻人查询/应答端口
-#define DB_BEACON_PORT   53119              // 在线宣告源端口
 #define DB_DRAIN_PORT1   6668               // 门口机音频端口（双向：收访客语音→转发视频桥；发住户语音→门口机）
 #define DB_DRAIN_PORT2   9880               // 门口机视频 RTP 入口（转发给 fnOS 视频桥）
 #define DB_CALL_TIMEOUT_MS  60000           // 接听后等待解锁的最长时间
-#define DB_BEACON_INTERVAL_MS 30000         // 在线宣告周期
 #define DB_UNLOCK_DELAY_MS  1500            // 自动模式下接听后延迟多久发 518
 #define DB_VIDEO_FWD_IP    "192.168.1.10" // 视频转发目标（飞牛 fnOS 主机，跑视频桥容器）
                                             // 注意是 fnOS 主机的 IP，不是 HA 的 192.168.1.11
@@ -67,31 +66,34 @@ static const DbGate DB_GATES[] = {
 };
 static const int DB_GATE_COUNT = sizeof(DB_GATES) / sizeof(DB_GATES[0]);
 
+// 本户房号（BCD 编码，各占 1 字节）。例如 7 楼（栋）02 室 → 0x07, 0x02。
+// ⚠️ 必须改成你家的真实房号，否则固件不会应答本户呼叫、自动接听也不会触发。
+// 抓取门口机呼叫不同房号时的 6672 查询包对比即可确认这两个字节。
+#define DB_ROOM_HI  0x00
+#define DB_ROOM_LO  0x00
+
 // ---------------- 抓包提取的固定帧 ----------------
-static const uint8_t DB_BEACON_FRAME[] = {  // 在线宣告（真实主机周期广播）
-  0x00,0x25,0x02,0x00,0x00,0x25,0x02,0x06,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x44,0xb6
-};
 static const uint8_t DB_FRAME_705[] = {  // 查询应答
   0x07,0xb8,0x18,0x00,0x00,0x00,0x72,0x65,0x71,0x3d,0x37,0x30,0x35,0x26,0x71,0x75,
   0x65,0x72,0x79,0x2a,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x01
 };
 static const uint8_t DB_FRAME_710[] = {  // 接听
   0x07,0xb8,0x1e,0x00,0x00,0x00,0x72,0x65,0x71,0x3d,0x37,0x31,0x30,0x26,0x71,0x75,
-  0x65,0x72,0x79,0x3d,0x25,0x02,0x00,0x00,0x25,0x02,0x06,0x02,0x01,0x00,0x00,0x00,
+  0x65,0x72,0x79,0x3d,0x25,0x02,0x00,0x00,0x25,0x02,DB_ROOM_HI,DB_ROOM_LO,0x01,0x00,0x00,0x00,
   0x01,0x00,0x00,0x00
 };
 static const uint8_t DB_FRAME_518[] = {  // 解锁
   0x07,0xb8,0x18,0x00,0x00,0x00,0x72,0x65,0x71,0x3d,0x35,0x31,0x38,0x26,0x71,0x75,
-  0x65,0x72,0x79,0x3d,0x22,0x25,0x02,0x00,0x00,0x25,0x02,0x06,0x02,0x78
+  0x65,0x72,0x79,0x3d,0x22,0x25,0x02,0x00,0x00,0x25,0x02,DB_ROOM_HI,DB_ROOM_LO,0x78
 };
 static const uint8_t DB_FRAME_708[] = {  // 挂断
   0x07,0xb8,0x1e,0x00,0x00,0x00,0x72,0x65,0x71,0x3d,0x37,0x30,0x38,0x26,0x71,0x75,
-  0x65,0x72,0x79,0x3d,0x25,0x02,0x00,0x00,0x25,0x02,0x06,0x02,0x01,0x00,0x00,0x00,
+  0x65,0x72,0x79,0x3d,0x25,0x02,0x00,0x00,0x25,0x02,DB_ROOM_HI,DB_ROOM_LO,0x01,0x00,0x00,0x00,
   0x01,0x00,0x00,0x00
 };
 static const uint8_t DB_FRAME_704[] = {  // 请求监视（主机按监视键时发出，字节与抓包一致）
   0x07,0xb8,0x1e,0x00,0x00,0x00,0x72,0x65,0x71,0x3d,0x37,0x30,0x34,0x26,0x71,0x75,
-  0x65,0x72,0x79,0x2a,0x25,0x02,0x00,0x00,0x25,0x02,0x06,0x02,0x80,0x00,0x00,0x00,
+  0x65,0x72,0x79,0x2a,0x25,0x02,0x00,0x00,0x25,0x02,DB_ROOM_HI,DB_ROOM_LO,0x80,0x00,0x00,0x00,
   0x02,0x00,0x00,0x01
 };
 static const uint8_t DB_FRAME_709[] = {  // 监视确认（门禁机回连 18022 时回复）
@@ -216,10 +218,9 @@ static bool db_ignored_seen(const char *ip) {
 }
 
 // 构造 6672 查询应答：首字节 00->01，第 5~8 字节替换为本机 IP
+// 构造 6672 应答：回显查询帧，首字节 00→01，第 5~8 字节换成本机（冒充室内主机）的 IP。
+// 调用方已保证只对本户房号调用，异常输入直接返回 0（不应答）。
 static size_t db_build_reply(const uint8_t *q, size_t n, uint8_t *out) {
-  static const uint8_t fallback[21] = {
-    0x01,0x25,0x02,0x06,0x02,0xc0,0xa8,0x69,0x3d,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00
-  };
   if (n == 21 && q[0] == 0x00) {
     memcpy(out, q, 21);
     out[0] = 0x01;
@@ -227,8 +228,7 @@ static size_t db_build_reply(const uint8_t *q, size_t n, uint8_t *out) {
     memcpy(out + 5, &a, 4);
     return 21;
   }
-  memcpy(out, fallback, 21);
-  return 21;
+  return 0;
 }
 
 static bool db_contains(const uint8_t *buf, size_t n, const char *needle) {
@@ -240,15 +240,15 @@ static bool db_contains(const uint8_t *buf, size_t n, const char *needle) {
 }
 
 // 区分“真实振铃”和“周期性状态探针”（两者都是门口机→主机 18022 的 req=704 帧）：
-// 真实振铃帧 "req=704&query*" 后第 1 个二进制字段固定为 25 02 06 02
-//   —— 多台门口机的真实振铃抓包均如此；
-// 西门每 ~60 秒的状态探针帧该字段为全 0（PC 时代日志 10:11:31/10:12:23，与探针节奏吻合）。
+// 真实振铃帧 "req=704&query*" 后第 1 个二进制字段固定为 25 02 + 本户房号（DB_ROOM_HI/DB_ROOM_LO）
+//   —— 多台门口机真实振铃抓包均如此；
+// 门口机每 ~60 秒的状态探针帧该字段为全 0（抓包节奏吻合）。
 static bool db_is_real_ring(const uint8_t *f, int n) {
   static const char q[] = "req=704&query*";
   const int ql = 14;
   for (int i = 0; i + ql + 4 <= n; i++)
     if (memcmp(f + i, q, ql) == 0)
-      return f[i+ql] == 0x25 && f[i+ql+1] == 0x02 && f[i+ql+2] == 0x06 && f[i+ql+3] == 0x02;
+      return f[i+ql] == 0x25 && f[i+ql+1] == 0x02 && f[i+ql+2] == DB_ROOM_HI && f[i+ql+3] == DB_ROOM_LO;
   return false;   // 找不到完整特征，谨慎起见不按振铃处理
 }
 
@@ -476,7 +476,7 @@ static bool db_eth_init() {
     return false;
   }
 
-  // 静态 IP：192.168.105.61 / 255.255.0.0（冒充室内主机）
+  // 静态 IP：DB_ETH_IP / 255.255.0.0（冒充室内主机）
   esp_netif_dhcpc_stop(eth_netif);
   esp_netif_ip_info_t ip_info = {};
   esp_netif_str_to_ip4(DB_ETH_IP, &ip_info.ip);
@@ -574,13 +574,14 @@ static void db_session_task(void *pv) {
   }
 
   // 4. 解锁
-  // 518 末字节按门口机区分（抓包实测：多数门口机=0x78，个别机型=0x79，需逐台抓包确认）。
+  // 518 末字节按门口机区分（抓包实测：多数门口机用 0x78，个别用 0x79，见下方特判）。
   // B 系门口机收到后通常不应答、直接断开——“无应答”属正常，真实主机抓包亦如此；
   // 只有 TCP 连接/发送本身失败才重试，最多 3 次。各次失败的阶段和 errno 见上方日志。
   if (unlocked) {
     uint8_t f518[sizeof(DB_FRAME_518)];
     memcpy(f518, DB_FRAME_518, sizeof(f518));
-    if (!strcmp(ss->ip, "192.168.105.24")) f518[sizeof(f518) - 1] = 0x79;   // ⚠️ 这台门口机的 518 校验字节抓包实测为 0x79；换门口机要重新抓包确认
+    // 个别门口机的 518 末字节抓包实测为 0x79（多数为 0x78）；换门口机要重新抓包确认
+    if (!strcmp(ss->ip, "192.168.105.24")) f518[sizeof(f518) - 1] = 0x79;
     bool ok518 = false;
     for (int i = 0; i < 3 && !ok518; i++) {
       if (i) { ESP_LOGW(DB_TAG, "518 第 %d 次重试…", i + 1); vTaskDelay(pdMS_TO_TICKS(500)); }
@@ -618,7 +619,7 @@ static void db_session_task(void *pv) {
 // ---------------- 视频转发套接字 ----------------
 // 必须绑定 WiFi 网卡的 IP 作为源地址：家里的 192.168.1.0/24 被对讲网的
 // 192.168.0.0/16 包含，lwIP 路由按 netif 链表顺序匹配（后挂载的以太网排在
-// 前面），不绑定的话发往视频桥所在网段（例如 192.168.1.x）的包会被错发进对讲网，fnOS 永远收不到。
+// 前面），不绑定的话发往 192.168.1.x 的包会被错发进对讲网，fnOS 永远收不到。
 static int db_make_vfwd_socket() {
   int s = ::socket(AF_INET, SOCK_DGRAM, 0);
   if (s < 0) return -1;
@@ -861,6 +862,10 @@ static void db_main_task(void *pv) {
   }
 
   int q = db_udp_bind(DB_QUERY_PORT);
+  {   // 2026-10-14 调试：打开 IP_PKTINFO，记录每个 6672 数据包的目标地址（区分单播/广播）
+    int one_ = 1;
+    if (q >= 0) setsockopt(q, IPPROTO_IP, IP_PKTINFO, &one_, sizeof(one_));
+  }
   int d1 = db_udp_bind(DB_DRAIN_PORT1);
   int d2 = db_udp_bind(DB_DRAIN_PORT2);
   db_vsock = d2;   // 9880 视频入口交给 db_vrx_task 专职处理
@@ -878,21 +883,8 @@ static void db_main_task(void *pv) {
   audio_fwd.sin_port = htons(DB_AUDIO_FWD_PORT);
   audio_fwd.sin_addr.s_addr = db_bridge_addr;
 
-  // 在线宣告套接字：源端口 53119，允许广播
-  int bc = ::socket(AF_INET, SOCK_DGRAM, 0);
+  // 在线宣告套接字已删除（2026-10-15，见下方“周期在线宣告已删除”说明）
   int one = 1;
-  setsockopt(bc, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
-  struct sockaddr_in bla;
-  memset(&bla, 0, sizeof(bla));
-  bla.sin_family = AF_INET;
-  bla.sin_port = htons(DB_BEACON_PORT);
-  bla.sin_addr.s_addr = inet_addr(DB_ETH_IP);
-  bind(bc, (struct sockaddr *)&bla, sizeof(bla));
-  struct sockaddr_in bc_dst;
-  memset(&bc_dst, 0, sizeof(bc_dst));
-  bc_dst.sin_family = AF_INET;
-  bc_dst.sin_port = htons(DB_QUERY_PORT);
-  bc_dst.sin_addr.s_addr = inet_addr(DB_BROADCAST);
 
   // 视频转发目标与转发套接字已挪进 db_vtx_task（空闲时自动建好、坏了自动重建）
 
@@ -922,7 +914,6 @@ static void db_main_task(void *pv) {
       !db_spawn_prio(db_vtx_task, "db_vtx", 5120, NULL, 11))
     ESP_LOGE(DB_TAG, "视频接力任务创建失败，视频转发不可用");
 
-  uint32_t last_beacon = db_millis() - DB_BEACON_INTERVAL_MS + 5000;  // 启动 5 秒后首发
   uint32_t last_reg = db_millis() - DB_REG_INTERVAL_MS + 8000;        // 注册帧启动 8 秒后首发
   uint32_t last_reply[DB_GATE_COUNT] = {0};
 
@@ -943,7 +934,11 @@ static void db_main_task(void *pv) {
     int r = select(maxfd + 1, &rf, NULL, NULL, &tv);
 
     if (r > 0) {
-      // --- 6672 寻人查询 ---
+      // --- 6672 寻人查询（2026-10-15 修复版：只应答本户房号的真实呼叫查询） ---
+      // 抓包结论：门口机呼叫时广播 21 字节查询，第 3、4 字节为 BCD 房号
+      // （呼本户 = 房号两字节匹配，呼别户 = 不匹配）；通用轮询/陌生设备宣告这两字节为 00 00。
+      // 修复点：非本户房号一律不应答（旧版逢问必答，把呼别户的查询也答成本户房号，
+      // 导致同小区其他门口机的呼叫被劫持到本户，物业上门才定位到这个问题）。
       if (q >= 0 && FD_ISSET(q, &rf)) {
         uint8_t buf[64];
         struct sockaddr_in from;
@@ -958,19 +953,25 @@ static void db_main_task(void *pv) {
             if (!db_ignored_seen(ipbuf))
               ESP_LOGW(DB_TAG, "%s 不在白名单，已忽略（不再提示）", ipbuf);
           } else if (buf[0] == 0x00) {   // 0x00 才是查询帧
-            uint32_t now = db_millis();
-            if (now - last_reply[gi] >= 1000) {   // 同设备 1 秒防抖
-              last_reply[gi] = now;
-              uint8_t reply[32];
-              size_t rl = db_build_reply(buf, n, reply);
-              struct sockaddr_in gd;
-              memset(&gd, 0, sizeof(gd));
-              gd.sin_family = AF_INET;
-              gd.sin_port = htons(DB_QUERY_PORT);
-              gd.sin_addr.s_addr = inet_addr(ipbuf);
-              sendto(q, reply, rl, 0, (struct sockaddr *)&gd, sizeof(gd));
-              sendto(q, reply, rl, 0, (struct sockaddr *)&from, fl);   // 双保险
-              ESP_LOGI(DB_TAG, "已应答 %s（%s）的查询", DB_GATES[gi].name, ipbuf);
+            if (n == 21 && buf[3] == DB_ROOM_HI && buf[4] == DB_ROOM_LO) {   // 找的是本户
+              uint32_t now = db_millis();
+              if (now - last_reply[gi] >= 1000) {   // 同设备 1 秒防抖
+                last_reply[gi] = now;
+                uint8_t reply[32];
+                size_t rl = db_build_reply(buf, n, reply);
+                if (rl > 0) {
+                  struct sockaddr_in gd;
+                  memset(&gd, 0, sizeof(gd));
+                  gd.sin_family = AF_INET;
+                  gd.sin_port = htons(DB_QUERY_PORT);
+                  gd.sin_addr.s_addr = inet_addr(ipbuf);
+                  sendto(q, reply, rl, 0, (struct sockaddr *)&gd, sizeof(gd));
+                  sendto(q, reply, rl, 0, (struct sockaddr *)&from, fl);   // 双保险
+                  ESP_LOGI(DB_TAG, "已应答 %s（%s）呼本户的查询", DB_GATES[gi].name, ipbuf);
+                }
+              }
+            } else if (n == 21 && (buf[3] != 0x00 || buf[4] != 0x00)) {
+              ESP_LOGI(DB_TAG, "忽略 %s 查询其他房号 %02x %02x（不应答）", ipbuf, buf[3], buf[4]);
             }
           }
         }
@@ -1006,7 +1007,7 @@ static void db_main_task(void *pv) {
             gd.sin_family = AF_INET;
             gd.sin_port = htons(6668);
             gd.sin_addr.s_addr = db_gate_addr[db_gate_idx];
-            sendto(d1, ubuf, un, 0, (struct sockaddr *)&gd, sizeof(gd));   // 源 105.61:6668，出对讲网卡
+            sendto(d1, ubuf, un, 0, (struct sockaddr *)&gd, sizeof(gd));   // 源端口 6668，出对讲网卡
             db_last_uplink_ms = db_millis();
           }
         }
@@ -1027,8 +1028,8 @@ static void db_main_task(void *pv) {
               ESP_LOGW(DB_TAG, "%s 呼入，不在白名单，已断开（不再提示）", ipbuf);
           } else {
             // 先收首帧再定性 —— 门口机连上后会立即发一帧。抓包实测的帧型：
-            //   req=704(36B)：访客振铃（"query*"后字段=25 02 06 02），或监视回连
-            //   req=704(36B) 但字段全 0：门口机的周期性状态探针（西门 ~60 秒一次）
+            //   req=704(36B)：访客振铃（"query*"后字段=25 02 + 本户房号），或监视回连
+            //   req=704(36B) 但字段全 0：门口机的周期性状态探针（约每 60 秒一次）
             //   req=708(36B)：通话结束/取消通知（真实主机收到后不回复直接关）
             // 以前见连接就当振铃自动接听，结果把监视回连、708 通知和状态探针全部接成“幽灵呼叫”。
             struct timeval ftv;
@@ -1049,9 +1050,9 @@ static void db_main_task(void *pv) {
             } else if (db_handle_monitor_callback(cfd, gi)) {
               // 监视回连，已回 709 并关闭（函数内处理）
             } else if (!db_is_real_ring(fb, fn)) {
-              // 周期性状态探针（西门每 ~60 秒一次，帧型 req=704 但二进制字段为 0）。
-              // 与负一楼/南门的 24 字节探针一样：不回复直接关——多天实测无副作用。
-              // 以前把它当振铃自动接听，于是西门每小时准时“幽灵呼叫”一次。
+              // 周期性状态探针（某台门口机约每 60 秒一次，帧型 req=704 但二进制字段为 0）。
+              // 与其他门口机的 24 字节探针一样：不回复直接关——多天实测无副作用。
+              // 以前把它当振铃自动接听，于是门口机每小时准时“幽灵呼叫”一次。
               // 不回发任何数据的连接一律 RST 关断，不留 TIME_WAIT 占连接池。
               db_rst_close(cfd);
               ESP_LOGI(DB_TAG, "%s 发来状态探针（req=704 但字段为 0，非振铃），已忽略", DB_GATES[gi].name);
@@ -1100,12 +1101,10 @@ static void db_main_task(void *pv) {
       }
     }
 
-    // --- 周期在线宣告 ---
-    if (db_millis() - last_beacon >= DB_BEACON_INTERVAL_MS) {
-      last_beacon = db_millis();
-      if (bc >= 0)
-        sendto(bc, DB_BEACON_FRAME, sizeof(DB_BEACON_FRAME), 0, (struct sockaddr *)&bc_dst, sizeof(bc_dst));
-    }
+    // --- 周期在线宣告已删除（2026-10-15）---
+    // 真主机抓包证实：真主机从不主动广播在线宣告。旧版 ESP32 每 30 秒广播
+    // 一次"我是本户"的在线宣告，正是它污染了门口机的邻居表，
+    // 叠加 6672 逢问必答导致别家呼叫被劫持。行为向真主机收敛：彻底不广播。
 
     // --- 主机注册（req=564 + req=888，真实主机开机即向门口机发，发后即忘） ---
     // 怀疑门口机要先见过"主机注册"才肯执行 518 解锁——真实主机抓包里开机就发了这两帧。
