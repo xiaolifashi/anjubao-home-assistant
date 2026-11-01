@@ -1,0 +1,20 @@
+# go2rtc 配置 —— 门禁视频流
+#
+# 浏览器不能直接播 RTSP，所以由 go2rtc 把门禁流转成 WebRTC 给面板页。
+api:
+  listen: ":1984"      # 管理界面/接口：http://<NAS_IP>:1984
+rtsp:
+  listen: ":8554"      # 视频桥推流到 rtsp://127.0.0.1:8554/menjin
+webrtc:
+  listen: ":8555"
+  candidates:
+    - 192.168.1.10:8555   # 改成飞牛的内网地址，浏览器 WebRTC 直连用
+
+streams:
+  # 必须预声明 menjin！新版 go2rtc（1.9.x）不允许向未定义的流匿名推流：
+  # 视频桥的 ffmpeg 一推流就会被静默断开（Broken pipe），流列表永远是空的。
+  # 用空列表即可——视频桥 7x24 推流（空闲时推"门禁待机中"画面，有呼叫时推实时画面）。
+  menjin: []
+
+  # 如需接入其他 RTSP 摄像头，按下面格式加（门禁功能本身不依赖）：
+  # camera: rtsp://<USER>:<PASSWORD>@<CAMERA_IP>:554/stream

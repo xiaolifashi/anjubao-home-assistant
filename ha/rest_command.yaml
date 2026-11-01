@@ -1,0 +1,17 @@
+# ---- 门禁对讲：Fully Kiosk 平板远程指令 ----
+# 填入你平板的 IP、Fully Kiosk Remote Admin 密码、NAS 与 HA 地址后
+# 并入 HA 的 configuration.yaml（或 packages）。
+# 需要 Fully Kiosk Browser Plus（$7.5 一次性）才有 playSound 等高级指令。
+rest_command:
+  fully_panel:   # 跳转到门禁对讲面板页（楼下呼叫时自动打开）
+    url: "http://<TABLET_IP>:2323/?password=<FULLY_PASSWORD>&cmd=loadURL&url=https%3A%2F%2F<NAS_IP>%3A8443%2F"
+    method: get
+  fully_home:    # 挂断后跳回 Home Assistant 首页
+    url: "http://<TABLET_IP>:2323/?password=<FULLY_PASSWORD>&cmd=loadURL&url=http%3A%2F%2F<HA_IP>%3A8123"
+    method: get
+  fully_ring:    # 楼下呼叫时在平板上响铃
+    url: "http://<TABLET_IP>:2323/?password=<FULLY_PASSWORD>&cmd=playSound&url=http%3A%2F%2F<HA_IP>%3A8123%2Flocal%2Fring.wav"
+    method: get
+  fully_wake:    # 点亮平板屏幕
+    url: "http://<TABLET_IP>:2323/?password=<FULLY_PASSWORD>&cmd=screenOn"
+    method: get

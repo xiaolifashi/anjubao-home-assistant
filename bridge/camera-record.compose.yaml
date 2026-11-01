@@ -1,0 +1,33 @@
+services:
+  camera-record:
+    image: doorbell-video-video-bridge:latest   # 复用已有镜像（内含 ffmpeg + python3）
+    container_name: camera-record
+    network_mode: host                          # 需要访问 127.0.0.1:8554（go2rtc 的 RTSP）
+    restart: unless-stopped
+    environment:
+      TZ: CST-8                                 # 镜像无 tzdata，用 POSIX 时区串（UTC+8）
+      DETECT_URL: rtsp://127.0.0.1:8554/keting_sub
+      REC_URL: rtsp://127.0.0.1:8554/keting
+      OUT_DIR: /rec/go2rtc
+      CAP_KB: "1073741824"      # 客厅录像上限 1TB
+      DOOR_CAP_KB: "104857600"  # 门口机录像上限 100GB
+      HA_URL: http://192.168.1.11:8123
+      # 长期访问令牌，不要提交到仓库：在 HA「个人资料 → 安全 → 长期访问令牌」创建，
+      # 然后写进同目录的 .env 文件（已在 .gitignore 中），或直接改成你自己的值。
+      HA_TOKEN: "${HA_TOKEN:?请在 .env 中设置 HA_TOKEN}"
+      PIX_TH: "28"          # 单像素亮度差阈值（越小越敏感）
+      RATIO_TH: "0.006"     # 变化像素占比阈值
+      START_N: "2"          # 连续命中帧数才触发
+      TAIL_S: "30"          # 人走后继续录的秒数（避免片段过碎）
+      MAX_S: "600"          # 单段最长秒数
+      MIN_S: "30"           # 单段最短秒数
+      DEBUG: "0"
+    command: ["python3", "-u", "/motion_recorder.py"]
+    volumes:
+      - ./motion_recorder.py:/motion_recorder.py:ro
+      - /vol3/1000/摄像头回放:/rec              # 录像落在飞牛的「摄像头回放」目录
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
